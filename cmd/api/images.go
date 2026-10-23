@@ -105,6 +105,7 @@ func (app *application) createImageHandler(w http.ResponseWriter, r *http.Reques
 		app.serverErrorResponse(w, r, err)
 		return
 	}
+	app.logJobCommit(data.JobCommit{PublicID: job.PublicID, Version: job.Version, Status: job.Status, Stage: job.Stage, VariantsCompleted: job.VariantsCompleted, SimulationStep: job.SimulationStep}, "accepted")
 
 	//creates the URL where the client can check the job's status.
 	statusURL := "/v1/jobs/" + job.PublicID
@@ -213,30 +214,4 @@ func (app *application) getVariantHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	http.ServeFile(w, r, filepath.Join(app.variantStorageDir(), variant.Filename))
-}
-
-// getJobHandler returns the durable image job state for the public polling ID.
-func (app *application) getJobHandler(w http.ResponseWriter, r *http.Request) {
-	imageJob, err := app.models.Images.GetJob(r.Context(), r.PathValue("id"))
-	if errors.Is(err, data.ErrRecordNotFound) {
-		app.notFoundResponse(w, r)
-		return
-	}
-	if err != nil {
-		app.serverErrorResponse(w, r, err)
-		return
-	}
-
-	app.writeJSON(w, http.StatusOK, envelope{
-		"id":             imageJob.PublicID,
-		"image_id":       imageJob.ImageID,
-		"status":         imageJob.Status,
-		"queue_position": imageJob.QueuePosition,
-		"queued_at":      imageJob.QueuedAt,
-		"started_at":     imageJob.StartedAt,
-		"completed_at":   imageJob.CompletedAt,
-		"failed_at":      imageJob.FailedAt,
-		"error":          imageJob.Error,
-		"variants":       imageJob.Variants,
-	}, nil)
 }

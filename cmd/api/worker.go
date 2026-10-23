@@ -11,14 +11,20 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/teryn-guzman/gatekeeper-asynchronous/internal/data"
 )
 
 // processNextImageJob claims one queued job, processes it, and records either
 // a completed result or a durable failure for the polling endpoint.
 func (app *application) processNextImageJob(ctx context.Context) (err error) {
-	job, err := app.models.Images.ClaimNext(ctx)
+	job, queueChanges, err := app.models.Images.ClaimNext(ctx)
 	if err != nil {
 		return err
+	}
+	app.logJobCommit(data.JobCommit{PublicID: job.PublicID, Version: job.Version, Status: job.Status, Stage: job.Stage, VariantsCompleted: job.VariantsCompleted, SimulationStep: job.SimulationStep}, "processing_started")
+	for _, commit := range queueChanges {
+		app.logJobCommit(commit, "queue_position_changed")
 	}
 
 	// A panic here (e.g. a malformed image tripping up resize/decode) must not
@@ -27,48 +33,42 @@ func (app *application) processNextImageJob(ctx context.Context) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			app.logger.Error("image worker panic", "job_id", job.PublicID, "panic", r)
-			failCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = app.models.Images.Fail(failCtx, job.ID, "an unexpected error occurred while processing the image")
+			app.failImageJob(context.Background(), job.ID, "an unexpected error occurred while processing the image")
 			err = nil
 		}
 	}()
 
-	if app.config.imageProcessingDelay > 0 {
-		// Keep the delay in the worker so POST /v1/images still returns 202
-		// immediately while GET /v1/jobs/{public_id} shows processing.
-		timer := time.NewTimer(app.config.imageProcessingDelay)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			failCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = app.models.Images.Fail(failCtx, job.ID, "processing was interrupted")
-			return ctx.Err()
-		case <-timer.C:
+	for _, delay := range []time.Duration{app.config.imageProcessingDelay, app.config.quietDelay} {
+		if err := app.waitWorkerDelay(ctx, delay); err != nil {
+			app.failImageJob(context.Background(), job.ID, "processing was interrupted")
+			return err
 		}
+	}
+	if err := app.runSimulatedProgress(ctx, job.ID, job.PublicID); err != nil {
+		app.failImageJob(context.Background(), job.ID, "processing was interrupted")
+		return err
 	}
 
 	imageRecord, err := app.models.Images.Original(ctx, job.ImageID)
 	if err != nil {
-		_ = app.models.Images.Fail(ctx, job.ID, "original image is unavailable")
+		app.failImageJob(ctx, job.ID, "original image is unavailable")
 		return err
 	}
 
 	source, err := os.Open(filepath.Join(app.config.storageDir, imageRecord.StoredFilename))
 	if err != nil {
-		_ = app.models.Images.Fail(ctx, job.ID, "original image is unavailable")
+		app.failImageJob(ctx, job.ID, "original image is unavailable")
 		return err
 	}
 	defer source.Close()
 
 	decoded, _, err := image.Decode(source)
 	if err != nil {
-		_ = app.models.Images.Fail(ctx, job.ID, "original image could not be decoded")
+		app.failImageJob(ctx, job.ID, "original image could not be decoded")
 		return err
 	}
 
-	for _, profile := range []struct {
+	profiles := []struct {
 		name          string
 		width, height int
 		crop          bool
@@ -76,42 +76,121 @@ func (app *application) processNextImageJob(ctx context.Context) (err error) {
 		{"thumbnail", 150, 150, true},
 		{"preview", 800, 600, false},
 		{"display", 1200, 900, false},
-	} {
+	}
+	for index, profile := range profiles {
 		output, width, height := resize(decoded, profile.width, profile.height, profile.crop)
 		filename, err := randomFilename(".png")
 		if err != nil {
-			_ = app.models.Images.Fail(ctx, job.ID, "could not create output")
+			app.failImageJob(ctx, job.ID, "could not create output")
 			return err
 		}
 
 		path := filepath.Join(app.variantStorageDir(), filename)
 		file, err := os.Create(path)
 		if err != nil {
-			_ = app.models.Images.Fail(ctx, job.ID, "could not store output")
+			app.failImageJob(ctx, job.ID, "could not store output")
 			return err
 		}
 		if err = png.Encode(file, output); err != nil {
 			_ = file.Close()
-			_ = app.models.Images.Fail(ctx, job.ID, "could not encode output")
+			_ = os.Remove(path)
+			app.failImageJob(ctx, job.ID, "could not encode output")
 			return err
 		}
 		if err := file.Close(); err != nil {
-			_ = app.models.Images.Fail(ctx, job.ID, "could not close output file")
+			app.failImageJob(ctx, job.ID, "could not close output file")
 			return err
 		}
 
 		info, err := os.Stat(path)
 		if err != nil {
-			_ = app.models.Images.Fail(ctx, job.ID, "could not read output metadata")
+			app.failImageJob(ctx, job.ID, "could not read output metadata")
 			return err
 		}
-		if err := app.models.Images.AddVariant(ctx, job.ImageID, profile.name, filename, width, height, info.Size()); err != nil {
-			_ = app.models.Images.Fail(ctx, job.ID, "could not record output")
+		commit, err := app.models.Images.AddVariantAndProgress(ctx, job.ID, job.ImageID, profile.name, filename, width, height, info.Size(), index == len(profiles)-1)
+		if err != nil {
+			_ = os.Remove(path)
+			app.failImageJob(ctx, job.ID, "could not record output")
 			return err
+		}
+		app.logJobCommit(commit, "variant_progress")
+	}
+	return nil
+}
+
+func (app *application) waitWorkerDelay(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (app *application) runSimulatedProgress(ctx context.Context, jobID, publicID string) error {
+	duration, interval := app.config.simulationDuration, app.config.simulationInterval
+	if duration <= 0 || interval <= 0 {
+		return nil
+	}
+	app.logger.Info("simulated progress phase started", "job_id", publicID, "duration", duration.String(), "interval", interval.String())
+	deadline := time.Now().Add(duration)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if !time.Now().Before(deadline) {
+				app.logger.Info("simulated progress phase finished", "job_id", publicID)
+				return nil
+			}
+			commit, err := app.models.Images.AdvanceSimulation(ctx, jobID)
+			if err != nil {
+				return err
+			}
+			app.logJobCommit(commit, "simulated_progress")
 		}
 	}
+}
 
-	return app.models.Images.Complete(ctx, job.ID)
+func (app *application) logJobCommit(commit data.JobCommit, event string) {
+	committedAt := time.Now()
+	app.logger.Info("job committed",
+		"event", event,
+		"job_id", commit.PublicID,
+		"version", commit.Version,
+		"status", commit.Status,
+		"stage", commit.Stage,
+		"variants_completed", commit.VariantsCompleted,
+		"simulation_step", commit.SimulationStep,
+		"post_commit_at", committedAt.Format(time.RFC3339Nano),
+	)
+	if app.jobNotifier != nil {
+		app.jobNotifier.publish(commit.PublicID)
+	}
+}
+
+func (app *application) failImageJob(ctx context.Context, jobID, message string) {
+	failCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if ctx.Err() != nil {
+		failCtx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+	}
+	commit, err := app.models.Images.Fail(failCtx, jobID, message)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			app.logger.Error("could not persist image job failure", "error", err)
+		}
+		return
+	}
+	app.logJobCommit(commit, "failed")
 }
 
 // resize preserves aspect ratio, except for the fixed-size cropped thumbnail.

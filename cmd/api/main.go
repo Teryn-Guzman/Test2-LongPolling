@@ -18,6 +18,9 @@ type config struct {
 	env                  string
 	workerPollInterval   time.Duration
 	imageProcessingDelay time.Duration
+	quietDelay           time.Duration
+	simulationDuration   time.Duration
+	simulationInterval   time.Duration
 	storageDir           string
 	db                   struct {
 		dsn          string
@@ -31,6 +34,7 @@ type application struct {
 	config       config
 	logger       *slog.Logger
 	models       data.Models
+	jobNotifier  *jobNotifier
 	wg           sync.WaitGroup
 	workerCancel context.CancelFunc
 }
@@ -42,6 +46,9 @@ func main() {
 	flag.StringVar(&cfg.env, "env", "development", "Environment (development|staging|production)")
 	flag.DurationVar(&cfg.workerPollInterval, "worker-poll-interval", 250*time.Millisecond, "Worker queue-check interval")
 	flag.DurationVar(&cfg.imageProcessingDelay, "image-processing-delay", 0, "Artificial delay inside the image worker")
+	flag.DurationVar(&cfg.quietDelay, "quiet-delay", 0, "Experimental processing delay with no intermediate progress updates")
+	flag.DurationVar(&cfg.simulationDuration, "simulation-duration", 0, "Experimental simulated-progress phase duration (disabled at 0)")
+	flag.DurationVar(&cfg.simulationInterval, "simulation-interval", 0, "Experimental simulated-progress update interval (disabled at 0)")
 	flag.StringVar(&cfg.storageDir, "storage-dir", "./storage", "Directory for original and generated images")
 
 	flag.StringVar(&cfg.db.dsn, "db-dsn", "", "PostgreSQL DSN")
@@ -52,7 +59,11 @@ func main() {
 
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if cfg.quietDelay < 0 || cfg.simulationDuration < 0 || cfg.simulationInterval < 0 || (cfg.simulationDuration > 0 && cfg.simulationInterval == 0) {
+		logger.Error("invalid experimental workload configuration; durations cannot be negative and simulation requires an interval")
+		os.Exit(1)
+	}
 
 	db, err := openDB(cfg)
 	if err != nil {
@@ -62,11 +73,18 @@ func main() {
 	defer db.Close()
 
 	logger.Info("database connection pool established")
+	logger.Info("experiment workload configuration",
+		"image_processing_delay", cfg.imageProcessingDelay.String(),
+		"quiet_delay", cfg.quietDelay.String(),
+		"simulation_duration", cfg.simulationDuration.String(),
+		"simulation_interval", cfg.simulationInterval.String(),
+	)
 
 	app := &application{
-		config: cfg,
-		logger: logger,
-		models: data.NewModels(db),
+		config:      cfg,
+		logger:      logger,
+		models:      data.NewModels(db),
+		jobNotifier: newJobNotifier(),
 	}
 	if err := os.MkdirAll(cfg.storageDir, 0755); err != nil {
 		logger.Error(err.Error())

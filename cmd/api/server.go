@@ -13,7 +13,7 @@ func (app *application) serve() error {
 		Handler:      app.recoverPanic(app.logRequest(app.cors(app.routes()))),
 		IdleTimeout:  time.Minute,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 25 * time.Second,
 	}
 
 	shutdownError := app.gracefulShutdown(srv)

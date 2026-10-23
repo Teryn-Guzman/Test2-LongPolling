@@ -12,6 +12,8 @@ const elements = {
 	jobCard: document.querySelector('#job-card'),
 	results: document.querySelector('#results'),
 	resultCount: document.querySelector('#result-count'),
+	modeSelect: document.querySelector('#polling-mode'),
+	stopObservationButton: document.querySelector('#stop-observation-button'),
 };
 
 // Fixed variant contract so pending slots can render before the worker finishes.
@@ -30,6 +32,8 @@ const STATUS_LABELS = {
 };
 
 export function render(state) {
+	elements.modeSelect.value = state.mode || 'short';
+	elements.stopObservationButton.disabled = !state.observing;
 	renderSelection(state);
 	renderUploadState(state);
 	renderJob(state);
@@ -41,7 +45,7 @@ export function render(state) {
 function renderSelection(state) {
 	const { file, previewUrl } = state;
 	const hasValidFile = Boolean(file) && !state.uploadError;
-	const pickerHidden = hasValidFile || state.isSubmitting || state.choosingDifferentImage;
+	const pickerHidden = state.isSubmitting || (hasValidFile && !state.choosingDifferentImage);
 	const showChangeButton = hasValidFile || state.choosingDifferentImage;
 
 	elements.uploadError.textContent = state.uploadError;
@@ -111,12 +115,30 @@ function renderJob(state) {
 			</div>
 			<span class="badge badge-${status}"><i class="badge-dot"></i>${status === 'unknown' ? 'Not checked' : STATUS_LABELS[job.status] || 'Queued'}</span>
 		</div>
+		<div class="job-observation-meta">
+			<span><strong>Mode</strong> ${state.mode === 'long' ? 'Long polling' : 'Short polling'}</span>
+			<span><strong>Version</strong> ${Number.isInteger(job.version) ? job.version : '—'}</span>
+		</div>
 		<div class="job-split">
 			${timelineHTML(job)}
 			${asideHTML(state, job)}
 		</div>
+		${progressHTML(job)}
 		${measurementsHTML(state, job)}
 	`;
+}
+
+function progressHTML(job) {
+	const completed = Number.isInteger(job.variants_completed) ? job.variants_completed : 0;
+	const stage = job.stage ? job.stage.replaceAll('_', ' ') : 'starting';
+	const simulated = Number(job.simulation_step) > 0
+		? `<span class="simulated-progress">Simulated progress: step ${Number(job.simulation_step)}</span>`
+		: '';
+	return `<section class="job-progress" aria-label="Image processing progress">
+		<div class="progress-heading"><strong>Real variants</strong><span>${completed} of 3 stored</span></div>
+		<progress max="3" value="${completed}" aria-label="${completed} of 3 real variants stored"></progress>
+		<span class="progress-stage">Stage: ${escapeHTML(stage)}</span>${simulated}
+	</section>`;
 }
 
 // Required job lifecycle: accepted, stored, generating, complete.
@@ -161,6 +183,13 @@ function asideHTML(state, job) {
 			<button class="try-again" type="button" data-action="try-again">Try again</button>
 		</div>`;
 	}
+	if (state.paused) {
+		return `<div class="job-aside">
+			<strong class="aside-title">Observation stopped</strong>
+			<span class="aside-note">Image processing continues on the server.</span>
+			<button class="try-again" type="button" data-action="try-again">Resume observation</button>
+		</div>`;
+	}
 	if (job.status === 'completed') {
 		return `<div class="job-aside">
 			<strong class="aside-title is-good">Processing complete</strong>
@@ -175,8 +204,8 @@ function asideHTML(state, job) {
 	}
 	return `<div class="job-aside">
 		<span class="polling-dot"></span>
-		<strong class="aside-title">Checking status automatically</strong>
-		<span class="aside-note">Every 1 second</span>
+		<strong class="aside-title">${state.mode === 'long' ? 'Waiting for a newer version' : 'Checking status automatically'}</strong>
+		<span class="aside-note">${state.mode === 'long' ? 'Held request; next request follows each response.' : 'Short poll about every 1 second after each response.'}</span>
 		${job.status === 'queued' && job.queue_position ? `<span class="aside-note">Queue position: ${Number(job.queue_position)}</span>` : ''}
 	</div>`;
 }
@@ -185,20 +214,17 @@ function measurementsHTML(state, job) {
 	const measurements = state.measurements;
 	if (!measurements || job.status === 'uploading') return '';
 	const completedAt = job.completed_at || job.failed_at;
-	const queueWaitMs = job.queued_at && job.started_at ? Date.parse(job.started_at) - Date.parse(job.queued_at) : null;
 	const processingMs = job.started_at && completedAt ? Date.parse(completedAt) - Date.parse(job.started_at) : null;
-	const jobDurationMs = job.queued_at && completedAt ? Date.parse(completedAt) - Date.parse(job.queued_at) : null;
 	const rows = [
-		['Acknowledgement latency', formatDuration(measurements.acknowledgementLatencyMs)],
-		['Queue wait', formatDuration(queueWaitMs)],
-		['Processing duration', formatDuration(processingMs)],
-		['Total job duration', formatDuration(jobDurationMs)],
-		['Status GET requests', String(measurements.pollCount)],
-		['Detection delay (approx.)', formatDuration(measurements.detectionDelayMs)],
+		['Observation GETs started', String(measurements.requestsStarted ?? 0)],
+		['Distinct newer versions seen', String(measurements.versionsSeen ?? 0)],
+		['Terminal version', String(measurements.terminalVersion ?? '—')],
+		['Processing duration (DB timestamps)', formatDuration(processingMs)],
 	].filter(([, value]) => value !== '—');
 	return `<section class="job-measurements" aria-label="Job measurements">
-		<strong>Measurements</strong>
+		<strong>Observation snapshot</strong>
 		<dl>${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHTML(value)}</dd></div>`).join('')}</dl>
+		<span class="measurement-note">Compute detection delay by joining the client receipt log to the server post-commit log.</span>
 	</section>`;
 }
 
@@ -312,7 +338,10 @@ function capitalize(value) {
 }
 
 function formatBytes(bytes) {
-	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+	const exactBytes = new Intl.NumberFormat().format(bytes);
+	if (bytes < 1024) return `${exactBytes} bytes`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KiB (${exactBytes} bytes)`;
+	return `${(bytes / (1024 * 1024)).toFixed(2)} MiB (${exactBytes} bytes)`;
 }
 
 function mediaTypeLabel(file) {

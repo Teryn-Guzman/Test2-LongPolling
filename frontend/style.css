@@ -785,3 +785,122 @@ a:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- Assessment 2 observation and experiment controls ---------- */
+
+.assessment-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.assessment-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.assessment-controls select,
+.assessment-controls input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  color: var(--text);
+  background: #0c1322;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.assessment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.assessment-actions button {
+  padding: 7px 10px;
+  color: var(--cyan);
+  background: rgba(79, 209, 229, 0.08);
+  border: 1px solid rgba(79, 209, 229, 0.35);
+  font-size: 0.76rem;
+}
+
+.assessment-actions button:disabled {
+  opacity: 0.45;
+}
+
+.assessment-hint,
+.measurement-note {
+  display: block;
+  color: var(--faint);
+  font-size: 0.72rem;
+}
+
+.assessment-hint {
+  margin-bottom: 12px;
+}
+
+.job-observation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.job-observation-meta strong {
+  color: var(--text);
+}
+
+.job-progress {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  padding: 11px 12px;
+  background: #0b1220;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+}
+
+.progress-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.8rem;
+}
+
+.progress-heading span,
+.progress-stage {
+  color: var(--muted);
+  font-size: 0.76rem;
+  text-transform: capitalize;
+}
+
+.job-progress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--cyan);
+}
+
+.simulated-progress {
+  color: var(--amber);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.job-measurements {
+  margin-top: 14px;
+}
+
+@media (max-width: 420px) {
+  .assessment-controls {
+    grid-template-columns: 1fr;
+  }
+}

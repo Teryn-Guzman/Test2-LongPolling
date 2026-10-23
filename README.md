@@ -8,8 +8,8 @@ one in-process worker generates image variants independently of the upload
 request.
 
 The API returns `202 Accepted` when the original image and queued job have been
-stored. The browser then short-polls the job resource approximately once per
-second until the job is `completed` or `failed`.
+stored. The browser can observe the job with one-second short polling or
+version-based long polling until the job is `completed` or `failed`.
 
 ## Requirements
 
@@ -36,8 +36,9 @@ The DSN points to the local `image_lab` database using the `image_lab` role:
 postgres://image_lab:password@localhost:5432/image_lab?sslmode=disable
 ```
 
-The database and role must exist, and `citext` must be enabled (as in the setup
-above). Apply the project migrations to create the application tables:
+The database and role must exist, and `citext` must be enabled. Apply the
+project migrations to create/update the application tables (including the
+versioned-progress migration):
 
 ```bash
 make db/migrations/up
@@ -78,7 +79,8 @@ The API serves the frontend from `frontend/`, so do not open
 3. Click **Process image** once.
 4. `POST /v1/images` validates and stores the original image, creates a queued
    PostgreSQL job, and returns `202 Accepted`.
-5. The browser polls `GET /v1/jobs/{job_id}` every second.
+5. The browser fetches an initial job snapshot, then observes using the selected
+  short-poll or long-poll mode.
 6. The worker claims the queued job, creates all three variants, records their
    metadata, and marks the job `completed`.
 7. The browser stops polling and displays the generated images.
@@ -95,6 +97,60 @@ last known job and offers **Try again** instead of falsely marking the job as
 failed or uploading the image again. If the initial `POST /v1/images` itself
 fails (for example, a lost connection before any job exists), the UI instead
 offers **Retry upload**, which resubmits the same selected file.
+
+## Assessment 2: versioned observation
+
+The same PostgreSQL job is authoritative for both modes. Jobs start at version
+1; a version increases atomically with committed observable status/progress
+changes. `GET /v1/jobs/{id}` remains a prompt snapshot. A long poll uses
+`GET /v1/jobs/{id}?after=VERSION` and waits up to 20 seconds for a newer version.
+If the active job is unchanged at the holding deadline, the API returns an
+empty `204`; the browser immediately starts another long poll. A notification
+only wakes observers to re-read PostgreSQL; it is not a substitute for durable
+state. The server registers each observer before its initial read, broadcasts
+to all local subscribers after commit, and coalesces duplicate wakeups. The
+handler rechecks the database after every wake and before `204`, preventing a
+commit between the initial check and wait from being overlooked.
+Because queued job representations include `queue_position`, claiming a job
+also increments the versions of remaining queued jobs whose positions changed
+in the same transaction and notifies their observers after commit.
+
+Each real variant milestone stores its file metadata and increments the
+`variants_completed`, `stage`, and `version` fields in one transaction. The
+third milestone also marks the job completed in that transaction. Experimental
+simulated progress is separately recorded in `simulation_step`; it never
+changes the real variant count or causes completion. Client cancellation stops
+observation only; the worker continues.
+
+Select **Short polling** or **Long polling** before processing an image. Mode
+switching cancels the old request and resumes observation of the same job; it
+does not POST another image. The request timeout is 30 seconds. A normal 204 is
+not a retrieval error. For terminal jobs, observation stops. On a retrieval
+failure the UI preserves the last representation and **Try again** observes the
+same job.
+
+The migration `000011_add_versioned_job_progress` backfills existing jobs with
+version 1 and derives stored-variant progress. Apply it with
+`make db/migrations/up`. Server experiment options default to disabled:
+
+| Make variables | Example | Purpose |
+| --- | --- | --- |
+| `quiet_delay` | `quiet_delay=30s` | Delay work without intermediate changes (Condition A) |
+| `simulation_duration` | `simulation_duration=10s` | Experimental simulated phase duration |
+| `simulation_interval` | `simulation_interval=2s` or `200ms` | Simulated update interval (C1/C2/C3) |
+
+Examples and reproducible procedure are in [experiments/README.md](experiments/README.md).
+The page includes run condition/repetition/latency metadata and **Download raw
+client logs**. Server output is JSON Lines; log its stdout as documented, then
+join the raw client and server files with `experiments/analyze.py`. That script
+generates the required CSV, per-run/grouped comparison tables, and labelled
+SVG charts from actual log records. No results are included or assumed; fill in
+the predictions before measurement and submit the collected runs and concise
+report separately.
+
+**Baseline note:** the pre-Assessment-2 tree is commit `e03682d` (`intial
+setup`). Confirm that this is the exact Assessment 1 submission baseline before
+identifying it as the official Assessment 1 commit/tag in the final hand-in.
 
 ## HTTP API
 
