@@ -30,17 +30,16 @@ cp .envrc.example .envrc
 source .envrc
 ```
 
-The default DSN is:
+The DSN points to the local `image_lab` database using the `image_lab` role:
 
 ```text
-postgres://gatekeeper:password@localhost:5432/gatekeeper?sslmode=disable
+postgres://image_lab:password@localhost:5432/image_lab?sslmode=disable
 ```
 
-Create the database and required extensions as needed for your PostgreSQL
-installation, then apply the migrations:
+The database and role must exist, and `citext` must be enabled (as in the setup
+above). Apply the project migrations to create the application tables:
 
 ```bash
-psql "$GATEKEEPER_DB_DSN" -c 'CREATE EXTENSION IF NOT EXISTS citext;'
 make db/migrations/up
 ```
 
