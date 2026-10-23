@@ -67,7 +67,7 @@ func (app *application) gracefulShutdown(srv *http.Server) <-chan error {
 
 	// Q48: app.wg.Wait makes sure the worker has actually stopped. The worker calls
 	// app.wg.Done when it exits, which lets Wait continue and gives us a clean shutdown.
-	
+
 	shutdownError := make(chan error, 1)
 
 	go func() {
