@@ -6,10 +6,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
 type envelope map[string]any
+
+// uuidPattern matches the canonical lowercase form PostgreSQL returns for uuid
+// columns. IDs are opaque values this API issued, so nothing else can match a row.
+var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// parseUUIDParam lowercases a path value and reports whether it is a
+// well-formed UUID. A malformed value can never identify a record, so handlers
+// answer 404 instead of letting PostgreSQL fail the uuid cast with a 500.
+func parseUUIDParam(value string) (string, bool) {
+	id := strings.ToLower(value)
+	return id, uuidPattern.MatchString(id)
+}
 
 func (app *application) writeJSON(w http.ResponseWriter, status int, data envelope, headers http.Header) error {
 	js, err := json.MarshalIndent(data, "", "\t")

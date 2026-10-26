@@ -1,4 +1,4 @@
-import { uploadImage, getJob } from './modules/data-service.js';
+import { uploadImage, getJob } from './modules/data-service.js?v=14';
 import {
 	beginRun,
 	downloadClientLog,
@@ -9,9 +9,9 @@ import {
 	retrievalFailed,
 	setRunJob,
 	setRunMode,
-} from './modules/experiment-logger.js';
-import { AppState } from './state.js';
-import { bindRetryUpload, bindTryAgain, render } from './render.js';
+} from './modules/experiment-logger.js?v=14';
+import { AppState } from './state.js?v=14';
+import { bindRetryUpload, bindTryAgain, render } from './render.js?v=14';
 
 const form = document.querySelector('#upload-form');
 const input = document.querySelector('#image-input');
@@ -113,9 +113,10 @@ function handleModeChange() {
 	const mode = modeSelect.value;
 	const current = state.get();
 	if (current.mode === mode) return;
-	setRunMode(activeRun, mode);
 	const shouldResume = current.job && !isTerminal(current.job.status) && current.observing;
+	// Cancel first so the cancelled request is logged under the mode it was started in.
 	cancelObservation('mode_switch');
+	setRunMode(activeRun, mode);
 	state.update({ mode, observing: false });
 	if (shouldResume) void startObservation({ promptFirst: false });
 }
@@ -212,15 +213,21 @@ async function requestSnapshot(after, kind, generation) {
 		const response = await getJob(current.job.statusUrl, controller.signal, after);
 		if (generation !== observationGeneration) return null;
 		if (response.status === 204) {
-			responseReceived(activeRun, requestId, 204, null, kind);
+			responseReceived(activeRun, requestId, 204, null, kind, response.receivedAt, response.receivedPerfMs);
 			return { ...response, requestId };
 		}
 		if (!isValidRepresentation(response.job)) throw new Error('Invalid job representation.');
-		responseReceived(activeRun, requestId, response.status, response.job, kind);
+		responseReceived(activeRun, requestId, response.status, response.job, kind, response.receivedAt, response.receivedPerfMs);
 		return { ...response, requestId };
 	} catch (error) {
 		if (generation !== observationGeneration) return null;
-		retrievalFailed(activeRun, requestId, error.message || error.name || 'request failed', error.status || null);
+		// abort('request_timeout_30s') makes fetch reject with that bare string, not an Error.
+		const timedOut = error === 'request_timeout_30s'
+			|| (controller.signal.aborted && controller.signal.reason === 'request_timeout_30s');
+		const detail = timedOut
+			? 'client_timeout_30s'
+			: (error?.message || error?.name || (typeof error === 'string' && error) || 'request failed');
+		retrievalFailed(activeRun, requestId, detail, error?.status || null);
 		return { error, requestId };
 	} finally {
 		clearTimeout(timeout);

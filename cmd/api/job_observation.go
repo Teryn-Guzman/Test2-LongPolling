@@ -60,16 +60,22 @@ func isTerminalStatus(status string) bool {
 func (app *application) getJobHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	databaseReads := 0
+	jobID := r.PathValue("id")
 	defer func() {
-		app.logger.Info("observation database reads", "job_id", r.PathValue("id"), "queries", databaseReads)
+		app.logger.Info("observation database reads", "job_id", jobID, "queries", databaseReads)
 	}()
 	observation, err := parseObservationRequest(r)
 	if err != nil {
 		app.badRequestResponse(w, r, err)
 		return
 	}
+	jobID, ok := parseUUIDParam(jobID)
+	if !ok {
+		app.notFoundResponse(w, r)
+		return
+	}
 	if observation == nil {
-		job, reads, err := app.models.Images.GetJobWithReads(r.Context(), r.PathValue("id"))
+		job, reads, err := app.models.Images.GetJobWithReads(r.Context(), jobID)
 		databaseReads += reads
 		if errors.Is(err, data.ErrRecordNotFound) {
 			app.notFoundResponse(w, r)
@@ -83,7 +89,6 @@ func (app *application) getJobHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobID := r.PathValue("id")
 	wake, unsubscribe := app.jobNotifier.subscribe(jobID)
 	defer unsubscribe()
 	timer := time.NewTimer(observation.wait)
