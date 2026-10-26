@@ -69,7 +69,28 @@ def report_skipped(label, path, record_count, skipped):
         print(f"  ... and {len(skipped) - 5} more", file=sys.stderr)
 
 
-def input_check_lines(inputs):
+def exclude_runs(client_events, prefixes):
+    """Drop whole runs whose job id starts with a given prefix; the raw log is not touched."""
+    runs = {}
+    for event in client_events:
+        if event.get("run_id"):
+            runs.setdefault(event["run_id"], []).append(event)
+    dropped, excluded = set(), []
+    for prefix in prefixes:
+        if len(prefix) < 8:
+            raise SystemExit(f"--exclude-job {prefix!r} is too short; give at least 8 characters of the job id.")
+        matches = [run_id for run_id, events in runs.items()
+                   if any(str(event.get("job_id", "")).startswith(prefix) for event in events)]
+        if len(matches) != 1:
+            raise SystemExit(f"--exclude-job {prefix!r} matches {len(matches)} runs; it must match exactly one.")
+        events = runs[matches[0]]
+        info = next((event for event in events if event.get("job_id")), events[0])
+        dropped.add(matches[0])
+        excluded.append((info.get("job_id", ""), info.get("condition", ""), info.get("mode", ""), info.get("repetition", ""), len(events)))
+    return [event for event in client_events if event.get("run_id") not in dropped], excluded
+
+
+def input_check_lines(inputs, excluded=()):
     lines = ["## Input check", "", "| Log | File | JSON records read | Non-JSON lines skipped |", "|---|---|---:|---:|"]
     for label, path, record_count, skipped in inputs:
         lines.append(f"| {label} | {path} | {record_count} | {len(skipped)} |")
@@ -81,6 +102,11 @@ def input_check_lines(inputs):
         if len(skipped) > 5:
             lines.append(f"- {label}: ... and {len(skipped) - 5} more")
     lines.extend(["", "Skipped lines are excluded from the analysis only; the raw files are not modified.", ""])
+    if excluded:
+        lines.extend(["Runs excluded at the operator's request (raw log unchanged):", "", "| Job | Condition | Mode | Rep | Client events |", "|---|---|---|---:|---:|"])
+        for job_id, condition, mode, repetition, count in excluded:
+            lines.append(f"| {job_id} | {condition} | {mode} | {repetition} | {count} |")
+        lines.append("")
     return lines
 
 
@@ -350,15 +376,21 @@ def main():
     parser.add_argument("--client", required=True, help="Downloaded client JSONL observations")
     parser.add_argument("--server", required=True, help="Server JSONL stdout log")
     parser.add_argument("--out-dir", default="experiments/results", help="Output directory")
+    parser.add_argument("--exclude-job", action="append", default=[], metavar="JOB_ID_PREFIX",
+                        help="Leave one run out of the analysis by the first 8+ characters of its job id (repeatable)")
     args = parser.parse_args()
     client_events, client_skipped = read_jsonl(args.client)
     server_events, server_skipped = read_jsonl(args.server)
     report_skipped("client", args.client, len(client_events), client_skipped)
     report_skipped("server", args.server, len(server_events), server_skipped)
+    client_total = len(client_events)
+    client_events, excluded = exclude_runs(client_events, args.exclude_job)
+    for job_id, condition, mode, repetition, count in excluded:
+        print(f"Excluded run {condition}/{mode} rep {repetition} (job {job_id[:8]}, {count} client events) at your request.", file=sys.stderr)
     if not server_events:
         print("WARNING: the server log has no JSON records; detection delay, observation DB reads and version-gap notes will be blank.", file=sys.stderr)
-    inputs = [("client", args.client, len(client_events), client_skipped), ("server", args.server, len(server_events), server_skipped)]
-    input_check = input_check_lines(inputs)
+    inputs = [("client", args.client, client_total, client_skipped), ("server", args.server, len(server_events), server_skipped)]
+    input_check = input_check_lines(inputs, excluded)
     rows = summarize(client_events, server_events)
     if not rows:
         raise SystemExit("No client run records found; no results were generated.")
