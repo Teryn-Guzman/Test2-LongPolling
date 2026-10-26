@@ -144,13 +144,15 @@ The page includes run condition/repetition/latency metadata and **Download raw
 client logs**. Server output is JSON Lines; log its stdout as documented, then
 join the raw client and server files with `experiments/analyze.py`. That script
 generates the required CSV, per-run/grouped comparison tables, and labelled
-SVG charts from actual log records. No results are included or assumed; fill in
-the predictions before measurement and submit the collected runs and concise
-report separately.
+SVG charts from actual log records. Predictions, raw logs and results are in
+`experiments/` (`predictions.md`, `raw/`, `results/`); see
+[experiments/README.md](experiments/README.md) for the procedure, the exact
+analyzer command and the run notes.
 
-**Baseline note:** the pre-Assessment-2 tree is commit `e03682d` (`intial
-setup`). Confirm that this is the exact Assessment 1 submission baseline before
-identifying it as the official Assessment 1 commit/tag in the final hand-in.
+**Baseline:** Assessment 2 work started from commit
+`e03682d055cf31a32cfca75103fde4b26a959c52` (`intial setup`), the first commit of
+this repository, tagged `assessment1-baseline`. It contains the Assessment 1
+application that Assessment 2 extends.
 
 ## HTTP API
 
@@ -187,6 +189,9 @@ curl http://localhost:4000/v1/jobs/JOB_ID
 ```
 
 A completed job includes metadata for `thumbnail`, `preview`, and `display`.
+Variant metadata is returned only once the job is completed; before that,
+progress is reported through `variants_completed` and `stage`. A malformed or
+unknown job ID returns 404.
 
 ### Retrieve a variant
 
@@ -194,8 +199,9 @@ A completed job includes metadata for `thumbnail`, `preview`, and `display`.
 GET /v1/images/{image_id}/variants/{name}
 ```
 
-Known variants are served from the local storage directory. Arbitrary file
-paths are not exposed.
+Variants of completed jobs are served from the local storage directory; before
+the job completes the endpoint returns 404. Arbitrary file paths are not
+exposed.
 
 ## Variants
 

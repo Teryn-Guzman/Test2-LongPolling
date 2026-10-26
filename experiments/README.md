@@ -1,10 +1,10 @@
 # Assessment 2 experiment procedure and evidence
 
-No measurement results are included in the repository yet. Fill in predictions before each condition, collect actual browser/server logs, then run the analyzer. It creates the CSV, per-run and grouped summary tables, and labelled SVG charts from those logs only.
+This directory holds the Assessment 2 evidence: `predictions.md` (written and committed before any measurement), the raw browser and server logs in `raw/`, run notes, and the analyzer output in `results/`. The procedure below is the one that was followed: fill in predictions before each condition, collect actual browser/server logs, then run the analyzer. It creates the CSV, per-run and grouped summary tables, and labelled SVG charts from those logs only. The analyzer needs Python 3.11 or newer (`python3`, or `py` on Windows).
 
 ## Before running
 
-1. Record and verify the Assessment 1 baseline commit/tag. The current pre-Assessment-2 source tree began at `e03682d`; verify it is the submitted Assessment 1 state before describing it as the official baseline.
+1. Record the Assessment 1 baseline: Assessment 2 started from commit `e03682d055cf31a32cfca75103fde4b26a959c52` (tag `assessment1-baseline`).
 2. Fill in the five predictions in `predictions.md` before taking measurements.
 3. Use the same image file and keep image transformations unchanged. Clear the worker queue before every run; use one browser tab/observer and keep it foregrounded.
 4. Alternate mode order across repetitions (for example, short then long on repetitions 1 and 3, long then short on repetition 2).
@@ -37,7 +37,7 @@ The `experiment workload configuration` server log records the actual settings a
 
 ## Capture and analyze
 
-After a run, use **Download raw client logs** in the page. Combine/download traces for all runs without editing event timestamps. Keep the file as `experiments/raw/client.jsonl`; the browser log includes request starts, response receipt, HTTP status, returned version, render time, cancellations, errors, run metadata, and wall-clock epoch milliseconds. The server log is JSON Lines and can be joined by job ID and terminal version.
+The browser keeps its log in localStorage across page reloads, so it was cleared once before the first measured run and never between conditions. Every server start used `tee -a experiments/raw/server.jsonl` (append) so one server log covers all runs. After the last run, use **Download raw client logs** in the page. The download contains every run recorded so far; do not edit event timestamps. Keep the file as `experiments/raw/client.jsonl`; the browser log includes request starts, response receipt, HTTP status, returned version, render time, cancellations, errors, run metadata, and wall-clock epoch milliseconds. The server log is JSON Lines and can be joined by job ID and terminal version.
 
 Once the run set is complete:
 
@@ -48,11 +48,40 @@ python3 experiments/analyze.py \
   --out-dir experiments/results
 ```
 
+Add `--exclude-job JOB_ID_PREFIX` (at least 8 characters, repeatable) to leave a run out of the analysis. It must match exactly one run, the raw log is never modified, and the excluded runs are listed in the Input check of `summary.md`. The exact command used for the submitted results is under **Runs collected** below.
+
 Generated outputs:
 
-- `experiments/results/summary.csv` — every run and the required metrics (plus `observation_db_reads`).
-- `experiments/results/summary.md` — per-run rows, median and minimum–maximum by condition/mode, and run-count warnings.
+- `experiments/results/summary.csv` — every run and the required metrics, plus `observation_db_reads`, `artificial_delay_ms` and `real_processing_ms`.
+- `experiments/results/summary.md` — an input check (records read, non-JSON lines skipped, excluded runs), a workload check (each run's server flags and latency note against its condition label), per-run rows, median and minimum–maximum by condition/mode, and run-count warnings.
 - `experiments/results/request-count-by-condition.svg` — labelled median request-count chart.
 - `experiments/results/detection-delay-by-condition.svg` — labelled median completion-detection-delay chart in milliseconds.
 
-Detection delay uses browser `Date.now()` at terminal response receipt minus the server's `post_commit_at` log timestamp for the same job/version. This is valid only for the specified same-computer run; it remains an estimate affected by wall-clock resolution and scheduling. The script leaves detection blank if it cannot join the records and flags negative results instead of silently changing them. It also notes started requests with no response/error/cancellation record. Investigate missing logs, pending requests, version gaps, and unexpected outcomes before writing the report. Never edit raw logs to make runs look complete.
+Non-JSON lines in either log (for example a stray `go run` message) are skipped and counted rather than stopping the analysis. A run whose server flags or latency note disagree with its condition label is reported as `CONFIG MISMATCH` in its notes and in the workload check. `artificial_delay_ms` is the configured quiet and image-processing delay plus the measured length of the simulated phase; `real_processing_ms` is `processing_ms` minus that, and still includes the short claim-to-finish overhead.
+
+The browser stamps `Date.now()` as soon as the full response body has been read, before any logging work, and keeps its log in memory (it is written to localStorage after a terminal response, an error, or when the page is hidden), so storage work does not delay the timestamp. Detection delay uses browser `Date.now()` at terminal response receipt minus the server's `post_commit_at` log timestamp for the same job/version. This is valid only for the specified same-computer run; it remains an estimate affected by wall-clock resolution and scheduling. The script leaves detection blank if it cannot join the records and flags negative results instead of silently changing them. It also notes started requests with no response/error/cancellation record. Investigate missing logs, pending requests, version gaps, and unexpected outcomes before writing the report. Never edit raw logs to make runs look complete.
+
+## Runs collected
+
+The evidence is 30 measured runs: 5 conditions × 2 modes × 3 repetitions, one observer, the same image (`picture1.jpg`), on one computer. The mode order alternated by repetition: short then long (repetition 1), long then short (repetition 2), short then long (repetition 3). Server flags per condition: A `-quiet-delay=30s`; B none; C1 `-simulation-duration=10s -simulation-interval=2s`; C2 and C3 `-simulation-duration=10s -simulation-interval=200ms`. C3 also used a Chrome DevTools custom network profile with 200 ms latency and no bandwidth limit (latency note: `Chrome custom profile, 200 ms latency, no bandwidth limit`). Measured prompt-GET duration in C3 was 205–220 ms (median 215 ms) against 13–22 ms (median 16 ms) with no throttling in B, an added delay of about 199 ms.
+
+Two earlier attempts at condition A are in `client.jsonl` but are excluded from the analysis: A short repetition 1 (job `e9c04638-e6f5-4b3a-934f-dee8b1eee02e`, 38 client events) and A long repetition 1 (job `28d43985-136f-4b46-9db7-46455e1ce3c8`, 16 client events). They are the first two runs in the log, before the measured A runs, and their traces are shorter than the completed A runs of the same mode (94 and 18 events), consistent with attempts that were stopped early. Both were repeated as the measured A repetition 1 runs. The raw log is unchanged.
+
+The submitted results were produced with:
+
+```sh
+python3 experiments/analyze.py \
+  --client experiments/raw/client.jsonl \
+  --server experiments/raw/server.jsonl \
+  --out-dir experiments/results \
+  --exclude-job e9c04638 \
+  --exclude-job 28d43985
+```
+
+## Checking the actual C3 latency
+
+The 200 ms profile is nominal, so report what was measured. This prints the duration of each C3 run's first (prompt) request from the raw client log; a normal localhost request takes only a few milliseconds:
+
+```sh
+python3 -c "import json;[print(e['mode'],e['repetition'],round(e['request_duration_ms'])) for e in map(json.loads,open('experiments/raw/client.jsonl')) if e.get('condition')=='C3' and e.get('event')=='response_received' and e.get('request_kind')=='initial']"
+```
