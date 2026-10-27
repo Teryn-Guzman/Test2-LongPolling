@@ -18,7 +18,7 @@ export async function getJob(statusUrl, signal, after = null) {
 	if (after !== null) url.searchParams.set('after', String(after));
 	const response = await fetch(url, { signal, cache: 'no-store' });
 	if (response.status === 204) {
-		return { status: 204, job: null };
+		return { status: 204, job: null, receivedAt: Date.now(), receivedPerfMs: performance.now() };
 	}
 	if (!response.ok) {
 		const error = new Error(`Status request failed with HTTP ${response.status}.`);
@@ -26,7 +26,9 @@ export async function getJob(statusUrl, signal, after = null) {
 		throw error;
 	}
 	try {
-		return { status: response.status, job: await response.json() };
+		const job = await response.json();
+		// Stamp receipt as soon as the full representation is read, before any logging work.
+		return { status: response.status, job, receivedAt: Date.now(), receivedPerfMs: performance.now() };
 	} catch {
 		throw new Error('The status response was not valid JSON.');
 	}

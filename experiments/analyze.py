@@ -2,12 +2,21 @@
 """Summarize actual ImageLab Assessment 2 client/server JSONL logs."""
 
 import argparse
+import codecs
 import csv
 import json
+import re
 import statistics
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+
+if sys.version_info < (3, 11):
+    raise SystemExit(
+        "analyze.py needs Python 3.11 or newer: Go logs nanosecond RFC 3339 timestamps "
+        "that older versions of datetime.fromisoformat cannot parse."
+    )
 
 CSV_COLUMNS = [
     "run_id", "condition", "mode", "repetition", "job_id", "image",
@@ -15,23 +24,90 @@ CSV_COLUMNS = [
     "requests_started", "initial_200", "newer_200", "unchanged_200",
     "no_change_204", "retrieval_errors", "cancellations",
     "distinct_new_versions_seen", "processing_ms", "detection_ms", "notes",
-    "observation_db_reads",
+    "observation_db_reads", "artificial_delay_ms", "real_processing_ms",
 ]
 CONDITIONS = ["A", "B", "C1", "C2", "C3"]
 MODES = ["short", "long"]
 
 
 def read_jsonl(path):
-    rows = []
-    with Path(path).open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, 1):
-            if not line.strip():
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError as error:
-                raise SystemExit(f"Invalid JSON in {path}:{line_number}: {error}")
-    return rows
+    """Return (records, skipped) for a JSON Lines capture.
+
+    Captures made with `2>&1 | tee` can contain lines that are not log records,
+    such as `exit status 1` from `go run`, a truncated last line, or a blank
+    line. Those lines are skipped and returned so the caller can report them;
+    the raw file is never modified.
+    """
+    raw = Path(path).read_bytes()
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = raw.decode("utf-16")  # Windows PowerShell redirection writes UTF-16 with a BOM
+    else:
+        text = raw.decode("utf-8-sig", errors="replace")
+    records, skipped = [], []
+    for line_number, line in enumerate(text.split("\n"), 1):
+        line = line.rstrip("\r")
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            record = None
+        if isinstance(record, dict):
+            records.append(record)
+        else:
+            skipped.append((line_number, line.strip()[:80]))
+    return records, skipped
+
+
+def report_skipped(label, path, record_count, skipped):
+    if not skipped:
+        return
+    print(f"WARNING: {label} log {path}: skipped {len(skipped)} line(s) that are not JSON log records; kept {record_count} record(s).", file=sys.stderr)
+    for line_number, snippet in skipped[:5]:
+        print(f"  line {line_number}: {snippet}", file=sys.stderr)
+    if len(skipped) > 5:
+        print(f"  ... and {len(skipped) - 5} more", file=sys.stderr)
+
+
+def exclude_runs(client_events, prefixes):
+    """Drop whole runs whose job id starts with a given prefix; the raw log is not touched."""
+    runs = {}
+    for event in client_events:
+        if event.get("run_id"):
+            runs.setdefault(event["run_id"], []).append(event)
+    dropped, excluded = set(), []
+    for prefix in prefixes:
+        if len(prefix) < 8:
+            raise SystemExit(f"--exclude-job {prefix!r} is too short; give at least 8 characters of the job id.")
+        matches = [run_id for run_id, events in runs.items()
+                   if any(str(event.get("job_id", "")).startswith(prefix) for event in events)]
+        if len(matches) != 1:
+            raise SystemExit(f"--exclude-job {prefix!r} matches {len(matches)} runs; it must match exactly one.")
+        events = runs[matches[0]]
+        info = next((event for event in events if event.get("job_id")), events[0])
+        dropped.add(matches[0])
+        excluded.append((info.get("job_id", ""), info.get("condition", ""), info.get("mode", ""), info.get("repetition", ""), len(events)))
+    return [event for event in client_events if event.get("run_id") not in dropped], excluded
+
+
+def input_check_lines(inputs, excluded=()):
+    lines = ["## Input check", "", "| Log | File | JSON records read | Non-JSON lines skipped |", "|---|---|---:|---:|"]
+    for label, path, record_count, skipped in inputs:
+        lines.append(f"| {label} | {path} | {record_count} | {len(skipped)} |")
+    lines.append("")
+    for label, _path, _count, skipped in inputs:
+        for line_number, snippet in skipped[:5]:
+            safe = snippet.replace("`", "'").replace("|", "/")
+            lines.append(f"- {label} line {line_number}: `{safe}`")
+        if len(skipped) > 5:
+            lines.append(f"- {label}: ... and {len(skipped) - 5} more")
+    lines.extend(["", "Skipped lines are excluded from the analysis only; the raw files are not modified.", ""])
+    if excluded:
+        lines.extend(["Runs excluded at the operator's request (raw log unchanged):", "", "| Job | Condition | Mode | Rep | Client events |", "|---|---|---|---:|---:|"])
+        for job_id, condition, mode, repetition, count in excluded:
+            lines.append(f"| {job_id} | {condition} | {mode} | {repetition} | {count} |")
+        lines.append("")
+    return lines
 
 
 def epoch_ms(value):
@@ -41,6 +117,69 @@ def epoch_ms(value):
         return float(value)
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return parsed.timestamp() * 1000
+
+
+# Server flags each condition label requires (milliseconds); the label is only a dropdown.
+_C2 = {"quiet_delay": 0, "simulation_duration": 10000, "simulation_interval": 200}
+EXPECTED_WORKLOAD = {
+    "A": {"quiet_delay": 30000, "simulation_duration": 0, "simulation_interval": 0},
+    "B": {"quiet_delay": 0, "simulation_duration": 0, "simulation_interval": 0},
+    "C1": {"quiet_delay": 0, "simulation_duration": 10000, "simulation_interval": 2000},
+    "C2": _C2,
+    "C3": _C2,
+}
+_UNITS_MS = {"ns": 1e-6, "us": 1e-3, "\u00b5s": 1e-3, "ms": 1, "s": 1000, "m": 60000, "h": 3600000}
+
+
+def duration_ms(text):
+    """Parse a Go Duration.String() value such as 0s, 200ms or 1m30s; None if malformed."""
+    text = str(text)
+    parts = re.findall(r"(\d+(?:\.\d+)?)(ns|us|\u00b5s|ms|s|m|h)", text)
+    if not parts or "".join(number + unit for number, unit in parts) != text:
+        return None
+    return sum(float(number) * _UNITS_MS[unit] for number, unit in parts)
+
+
+def format_ms(value):
+    return f"{value / 1000:g}s" if value >= 1000 or value == 0 else f"{value:g}ms"
+
+
+def workload_problems(condition, latency_setting, workload):
+    """Return reasons the server flags or latency note disagree with the condition label."""
+    expected = EXPECTED_WORKLOAD.get(condition)
+    if expected is None:
+        return [f"unknown condition label {condition!r}"]
+    if not workload:
+        return ["server workload configuration not found in the log"]
+    problems = []
+    for name, want in expected.items():
+        got = duration_ms(workload.get(name, "missing"))
+        if got is None or abs(got - want) > 0.5:
+            problems.append(f"{name} was {workload.get(name, 'missing')} but condition {condition} expects {format_ms(want)}")
+    image = duration_ms(workload.get("image_processing_delay", "0s"))
+    if image is None or image > 0.5:
+        problems.append(f"image_processing_delay was {workload.get('image_processing_delay')} but experiments expect 0s")
+    if condition == "C3" and str(latency_setting).strip().lower() in ("", "none", "not recorded"):
+        problems.append("condition C3 needs the added-latency setting recorded")
+    return problems
+
+
+def simulation_phase_ms(job_events):
+    """Measured length of the simulated phase from the worker's start/finish log lines."""
+    def first(message):
+        return next((epoch_ms(event["time"]) for event in job_events if event.get("msg") == message and event.get("time")), None)
+    start, end = first("simulated progress phase started"), first("simulated progress phase finished")
+    return end - start if start is not None and end is not None else None
+
+
+def artificial_delay_ms(workload, phase_ms):
+    """Configured quiet and image delay plus the measured (else configured) simulated phase."""
+    if not workload:
+        return ""
+    quiet = duration_ms(workload.get("quiet_delay", "0s")) or 0
+    image = duration_ms(workload.get("image_processing_delay", "0s")) or 0
+    simulated = phase_ms if phase_ms is not None else (duration_ms(workload.get("simulation_duration", "0s")) or 0)
+    return round(quiet + image + simulated)
 
 
 def summarize(client_events, server_events):
@@ -129,6 +268,12 @@ def summarize(client_events, server_events):
             committed_observable = {version for version in committed_versions if baseline < version <= terminal_version}
             gaps = sorted(committed_observable - received_versions)
             notes.append("intermediate versions not received=" + (",".join(map(str, gaps)) if gaps else "none"))
+        artificial = artificial_delay_ms(workload, simulation_phase_ms(server_by_job.get(job_id, [])))
+        real_processing = processing_ms - artificial if processing_ms != "" and artificial != "" else ""
+        if real_processing != "" and real_processing < 0:
+            notes.append("artificial delay exceeds processing_ms; check the server flags")
+        for problem in workload_problems(metadata.get("condition", ""), metadata.get("latency_setting", ""), workload):
+            notes.append("CONFIG MISMATCH: " + problem)
         if workload:
             notes.append(
                 "server workload: quiet_delay={quiet}, simulation_duration={duration}, simulation_interval={interval}".format(
@@ -159,8 +304,24 @@ def summarize(client_events, server_events):
             "detection_ms": detection_ms,
             "notes": "; ".join(notes),
             "observation_db_reads": reads,
+            "artificial_delay_ms": artificial,
+            "real_processing_ms": real_processing,
         })
     return output
+
+
+def workload_check_lines(rows):
+    flagged = [row for row in rows if "CONFIG MISMATCH" in row["notes"]]
+    lines = ["## Workload check", ""]
+    if not flagged:
+        lines.append(f"All {len(rows)} run(s) match the server flags and latency note expected for their condition label.")
+    else:
+        lines.extend([f"{len(flagged)} of {len(rows)} run(s) disagree with their condition label. Fix or relabel before using them.", "", "| Run | Condition | Mode | Rep | Problem |", "|---|---|---|---:|---|"])
+        for row in flagged:
+            problems = "; ".join(part for part in row["notes"].split("; ") if part.startswith("CONFIG MISMATCH"))
+            lines.append(f"| {row['run_id']} | {row['condition']} | {row['mode']} | {row['repetition']} | {problems} |")
+    lines.extend(["", "Artificial delay is the configured quiet and image delay plus the measured simulated phase. Real processing is processing_ms minus that; it still includes claim-to-finish overhead.", ""])
+    return lines
 
 
 def median_range(values):
@@ -173,7 +334,7 @@ def median_range(values):
 
 def write_svg(path, title, metric, unit, rows):
     width, height = 920, 470
-    left, right, top, bottom = 180, 34, 62, 48
+    left, right, top, bottom = 180, 130, 62, 48
     chart_width = width - left - right
     chart_height = height - top - bottom
     groups = [(condition, mode, median_range([row[metric] for row in rows if row["condition"] == condition and row["mode"] == mode]))
@@ -215,10 +376,30 @@ def main():
     parser.add_argument("--client", required=True, help="Downloaded client JSONL observations")
     parser.add_argument("--server", required=True, help="Server JSONL stdout log")
     parser.add_argument("--out-dir", default="experiments/results", help="Output directory")
+    parser.add_argument("--exclude-job", action="append", default=[], metavar="JOB_ID_PREFIX",
+                        help="Leave one run out of the analysis by the first 8+ characters of its job id (repeatable)")
     args = parser.parse_args()
-    rows = summarize(read_jsonl(args.client), read_jsonl(args.server))
+    client_events, client_skipped = read_jsonl(args.client)
+    server_events, server_skipped = read_jsonl(args.server)
+    report_skipped("client", args.client, len(client_events), client_skipped)
+    report_skipped("server", args.server, len(server_events), server_skipped)
+    client_total = len(client_events)
+    client_events, excluded = exclude_runs(client_events, args.exclude_job)
+    for job_id, condition, mode, repetition, count in excluded:
+        print(f"Excluded run {condition}/{mode} rep {repetition} (job {job_id[:8]}, {count} client events) at your request.", file=sys.stderr)
+    if not server_events:
+        print("WARNING: the server log has no JSON records; detection delay, observation DB reads and version-gap notes will be blank.", file=sys.stderr)
+    inputs = [("client", args.client, client_total, client_skipped), ("server", args.server, len(server_events), server_skipped)]
+    input_check = input_check_lines(inputs, excluded)
+    rows = summarize(client_events, server_events)
     if not rows:
         raise SystemExit("No client run records found; no results were generated.")
+    workload_check = workload_check_lines(rows)
+    mismatched = [row for row in rows if "CONFIG MISMATCH" in row["notes"]]
+    if mismatched:
+        print(f"WARNING: {len(mismatched)} run(s) disagree with their condition label (see Workload check in summary.md):", file=sys.stderr)
+        for row in mismatched[:5]:
+            print(f"  {row['condition']}/{row['mode']} rep {row['repetition']} ({row['run_id']})", file=sys.stderr)
     output_dir = Path(args.out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "summary.csv").open("w", newline="", encoding="utf-8") as stream:
@@ -226,9 +407,9 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    lines = ["# Assessment 2 measured comparison", "", "Every row below is generated from the supplied client/server logs. Blank detection values mean the terminal commit could not be joined. The version lists and gaps are retained in the notes column.", "", "## Runs", "", "| Run | Condition | Mode | Rep | Job | Requests | Detection (ms) | Versions | Notes |", "|---|---|---|---:|---|---:|---:|---:|---|"]
+    lines = ["# Assessment 2 measured comparison", "", "Every row below is generated from the supplied client/server logs. Blank detection values mean the terminal commit could not be joined. The version lists and gaps are retained in the notes column.", "", *input_check, *workload_check, "## Runs", "", "| Run | Condition | Mode | Rep | Job | Requests | Detection (ms) | Processing (ms) | Artificial (ms) | Real (ms) | Versions | Notes |", "|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|"]
     for row in rows:
-        lines.append("| {run_id} | {condition} | {mode} | {repetition} | {job_id} | {requests_started} | {detection_ms} | {distinct_new_versions_seen} | {notes} |".format(**row))
+        lines.append("| {run_id} | {condition} | {mode} | {repetition} | {job_id} | {requests_started} | {detection_ms} | {processing_ms} | {artificial_delay_ms} | {real_processing_ms} | {distinct_new_versions_seen} | {notes} |".format(**row))
     lines.extend(["", "## Median (minimum–maximum) by condition and mode", "", "| Condition | Mode | Requests | Detection delay (ms) |", "|---|---|---:|---:|"])
     for condition in CONDITIONS:
         for mode in MODES:
@@ -243,7 +424,7 @@ def main():
     (output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     write_svg(output_dir / "request-count-by-condition.svg", "Observation request count by condition", "requests_started", "requests", rows)
     write_svg(output_dir / "detection-delay-by-condition.svg", "Completion-detection delay by condition", "detection_ms", "ms", rows)
-    print(f"Wrote {len(rows)} measured run rows to {output_dir}; inspect join notes and run-count warnings before submission.")
+    print(f"Wrote {len(rows)} measured run rows to {output_dir}; skipped {len(client_skipped)} client / {len(server_skipped)} server non-JSON line(s); inspect join notes and run-count warnings before submission.")
 
 
 if __name__ == "__main__":

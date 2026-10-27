@@ -204,7 +204,12 @@ func (app *application) storeOriginalImage(uploaded uploadedImage) error {
 
 // getVariantHandler serves the requested variant file from disk, or returns a 404 if it is not available.
 func (app *application) getVariantHandler(w http.ResponseWriter, r *http.Request) {
-	variant, err := app.models.Images.Variant(r.Context(), r.PathValue("id"), r.PathValue("name"))
+	imageID, ok := parseUUIDParam(r.PathValue("id"))
+	if !ok {
+		app.notFoundResponse(w, r)
+		return
+	}
+	variant, err := app.models.Images.Variant(r.Context(), imageID, r.PathValue("name"))
 	if errors.Is(err, data.ErrRecordNotFound) {
 		app.notFoundResponse(w, r)
 		return

@@ -124,7 +124,10 @@ func (m ImageModel) GetJob(ctx context.Context, id string) (*ImageJob, error) {
 }
 
 // GetJobWithReads returns the complete current snapshot and the number of SQL
-// statements attempted, for explicit observation-query accounting.
+// statements attempted, for explicit observation-query accounting. Variant
+// metadata is only included once the job is completed (all-or-complete results);
+// progress before that is reported through variants_completed and stage, so
+// queued, processing and failed jobs cost one read instead of two.
 func (m ImageModel) GetJobWithReads(ctx context.Context, id string) (*ImageJob, int, error) {
 	tx, err := m.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -144,6 +147,12 @@ func (m ImageModel) GetJobWithReads(ctx context.Context, id string) (*ImageJob, 
 	}
 	if err != nil {
 		return nil, 1, err
+	}
+	if job.Status != "completed" {
+		if err := tx.Commit(); err != nil {
+			return nil, 1, err
+		}
+		return job, 1, nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT name,width,height,stored_filename,size_bytes FROM image_variants WHERE image_id=$1 ORDER BY CASE name WHEN 'thumbnail' THEN 1 WHEN 'preview' THEN 2 ELSE 3 END`, job.ImageID)
 	if err != nil {
@@ -220,10 +229,15 @@ func (m ImageModel) Fail(ctx context.Context, id, message string) (JobCommit, er
 	return commit, err
 }
 
-// Variant looks up a single generated output by image ID and variant name.
+// Variant looks up a single generated output by image ID and variant name. It
+// only finds outputs of completed jobs, so partial results of a processing or
+// failed job are not served even though their files already exist on disk.
 func (m ImageModel) Variant(ctx context.Context, imageID, name string) (Variant, error) {
 	var v Variant
-	err := m.DB.QueryRowContext(ctx, `SELECT name,width,height,stored_filename,size_bytes FROM image_variants WHERE image_id=$1 AND name=$2`, imageID, name).Scan(&v.Name, &v.Width, &v.Height, &v.Filename, &v.Size)
+	err := m.DB.QueryRowContext(ctx, `SELECT v.name,v.width,v.height,v.stored_filename,v.size_bytes
+		FROM image_variants AS v
+		JOIN image_jobs AS j ON j.image_id=v.image_id
+		WHERE v.image_id=$1 AND v.name=$2 AND j.status='completed'`, imageID, name).Scan(&v.Name, &v.Width, &v.Height, &v.Filename, &v.Size)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrRecordNotFound
 	}

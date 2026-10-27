@@ -1,5 +1,8 @@
 const STORAGE_KEY = 'imagelab-assessment2-client-log-v1';
+// Written into every entry so a raw log shows which frontend build produced it.
+const LOGGER_BUILD = '14';
 
+// Entries live in memory; localStorage is only written after a run ends or on page hide.
 function readLog() {
 	try {
 		return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
@@ -8,7 +11,11 @@ function readLog() {
 	}
 }
 
-function saveLog(entries) {
+let entries = readLog();
+let saveTimer = null;
+
+function saveLog() {
+	saveTimer = null;
 	try {
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
 	} catch (error) {
@@ -16,8 +23,13 @@ function saveLog(entries) {
 	}
 }
 
+function scheduleSave() {
+	if (saveTimer === null) saveTimer = setTimeout(saveLog, 500);
+}
+
+window.addEventListener('pagehide', saveLog);
+
 function append(run, event, fields = {}) {
-	const entries = readLog();
 	entries.push({
 		run_id: run.id,
 		condition: run.condition,
@@ -26,12 +38,12 @@ function append(run, event, fields = {}) {
 		job_id: run.jobId || '',
 		image: run.image,
 		latency_setting: run.latencySetting,
+		client_build: LOGGER_BUILD,
 		event,
 		client_time_ms: Date.now(),
 		performance_time_ms: performance.now(),
 		...fields,
 	});
-	saveLog(entries);
 }
 
 export function beginRun(metadata) {
@@ -81,12 +93,13 @@ export function requestStarted(run, requestId, url, kind) {
 	append(run, 'request_start', { request_id: requestId, url, request_kind: kind, started_performance_ms: startedPerformanceMs });
 }
 
-export function responseReceived(run, requestId, status, job, kind) {
+export function responseReceived(run, requestId, status, job, kind, receivedAt = Date.now(), receivedPerfMs = performance.now()) {
 	run.pendingRequests.delete(requestId);
 	const version = Number.isInteger(job?.version) ? job.version : null;
 	const startedPerformanceMs = run.requestStartTimes.get(requestId);
-	const durationMs = startedPerformanceMs === undefined ? null : performance.now() - startedPerformanceMs;
+	const durationMs = startedPerformanceMs === undefined ? null : receivedPerfMs - startedPerformanceMs;
 	let classification = 'non_200';
+	let terminal = false;
 	if (status === 204) {
 		run.noChange204 += 1;
 		classification = 'no_change_204';
@@ -106,7 +119,8 @@ export function responseReceived(run, requestId, status, job, kind) {
 		if (version !== null) run.lastVersion = Math.max(run.lastVersion ?? version, version);
 		if (job.status === 'completed' || job.status === 'failed') {
 			run.terminalVersion = version;
-			run.terminalReceiptMs = Date.now();
+			run.terminalReceiptMs = receivedAt;
+			terminal = true;
 			const terminalAt = job.completed_at || job.failed_at;
 			if (job.started_at && terminalAt) {
 				run.processingMs = Date.parse(terminalAt) - Date.parse(job.started_at);
@@ -126,7 +140,10 @@ export function responseReceived(run, requestId, status, job, kind) {
 		started_at: job?.started_at || null,
 		completed_at: job?.completed_at || null,
 		failed_at: job?.failed_at || null,
+		client_time_ms: receivedAt,
+		performance_time_ms: receivedPerfMs,
 	});
+	if (terminal) scheduleSave();
 }
 
 export function responseRendered(run, requestId, version) {
@@ -143,6 +160,7 @@ export function retrievalFailed(run, requestId, detail, httpStatus = null) {
 		http_status: httpStatus,
 		request_duration_ms: startedPerformanceMs === undefined ? null : performance.now() - startedPerformanceMs,
 	});
+	scheduleSave();
 }
 
 export function requestCancelled(run, requestId, reason) {
@@ -158,7 +176,7 @@ export function requestCancelled(run, requestId, reason) {
 }
 
 export function downloadClientLog() {
-	const entries = readLog();
+	saveLog();
 	const contents = entries.map(entry => JSON.stringify(entry)).join('\n');
 	const blob = new Blob([contents ? `${contents}\n` : ''], { type: 'application/x-ndjson' });
 	const url = URL.createObjectURL(blob);

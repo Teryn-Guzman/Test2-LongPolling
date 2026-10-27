@@ -1,0 +1,3 @@
+Excluded A short rep1 (job e9c04638) and A long rep1 (job 28d43985): interrupted early attempts, repeated as the next runs.
+C3 prompt GET durations ms (short1,long1,long2,short2,short3,long3): 217,205,215,215,220,213; B no-throttle baseline: 18,20,14,22,14,13. Profile: Chrome custom, 200 ms latency, no bandwidth limit.
+Correction: the excluded A short rep1 (job e9c04638) and A long rep1 (job 28d43985) were recorded before server log capture began, so server.jsonl has no records for them, and their client traces are incomplete; repeated as the measured runs.
