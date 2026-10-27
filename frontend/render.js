@@ -18,9 +18,9 @@ const elements = {
 
 // Fixed variant contract so pending slots can render before the worker finishes.
 const VARIANT_SLOTS = [
-	{ name: 'thumbnail', label: 'Thumbnail', target: '150 x 150' },
-	{ name: 'preview', label: 'Preview', target: '800 x 600' },
-	{ name: 'display', label: 'Display', target: '1200 x 900' },
+	{ name: 'thumbnail', label: 'Thumbnail', target: '150 × 150' },
+	{ name: 'preview', label: 'Preview', target: 'Max 800 × 600' },
+	{ name: 'display', label: 'Display', target: 'Max 1200 × 900' },
 ];
 
 const STATUS_LABELS = {
@@ -274,6 +274,13 @@ function renderResults(state) {
 	elements.results.innerHTML = variants.map(readyCardHTML).join('');
 }
 
+function variantDimensionLabel(name, width, height) {
+	if (name === 'thumbnail') return '150 × 150';
+	if (name === 'preview') return `Max 800 × 600 (${Number(width) || 0} × ${Number(height) || 0})`;
+	if (name === 'display') return `Max 1200 × 900 (${Number(width) || 0} × ${Number(height) || 0})`;
+	return `${Number(width) || 0} × ${Number(height) || 0}`;
+}
+
 function readyCardHTML(variant) {
 	return `<article class="result">
 		<div class="result-frame">
@@ -281,7 +288,7 @@ function readyCardHTML(variant) {
 			<span class="pill pill-ready"><i class="pill-dot"></i>Ready</span>
 		</div>
 		<div class="result-meta">
-			<div><strong>${capitalize(variant.name)}</strong><span>${Number(variant.width) || 0} x ${Number(variant.height) || 0}</span></div>
+			<div><strong>${capitalize(variant.name)}</strong><span>${variantDimensionLabel(variant.name, variant.width, variant.height)}</span></div>
 			<a class="download" href="${escapeHTML(variant.url)}" target="_blank" rel="noreferrer">View / download</a>
 		</div>
 	</article>`;
