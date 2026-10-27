@@ -18,6 +18,20 @@ Teryn Guzman & Kelvin Gordon · CMPS 4191
 
 Medians of three runs per cell. Detection delay is shown with its minimum–maximum; request counts were identical across repetitions except C3 long (48–49). All 30 runs are in `results/summary.csv` and `results/summary.md`.
 
+### Short polling vs long polling: headline comparison
+
+The percentages below show the change with long polling relative to short polling; negative values mean long polling used less or was faster. Values compare medians of three runs per condition.
+
+| Condition | Requests: long vs short | Request change | DB reads: long vs short | Read change | Detection delay: long vs short | Delay change |
+|---|---:|---:|---:|---:|---:|---:|
+| A — quiet job | 6 vs 31 | −81% | 12 vs 32 | −63% | 5 vs 123 ms | −96% |
+| B — brief job | 5 vs 2 | +150% | 10 vs 3 | +233% | 2 vs 632 ms | −99.7% |
+| C1 — slow updates | 9 vs 12 | −25% | 18 vs 13 | +38% | 5 vs 802 ms | −99.4% |
+| C2 — fast updates | 54 vs 12 | +350% | 108 vs 13 | +731% | 3 vs 789 ms | −99.6% |
+| C3 — fast updates, +200 ms latency | 49 vs 10 | +390% | 50 vs 11 | +355% | 309 vs 1036 ms | −70.2% |
+
+**Main finding:** long polling delivered the completed result sooner in all five conditions, but it did not always reduce traffic. It was most efficient when updates were rare (A) and generated substantially more requests and database reads when updates were very frequent (C2 and C3). The following paired charts and detailed table show the same short/long comparison in absolute values.
+
 | Condition | Requests short / long | DB reads short / long | Detection delay, short (ms) | Detection delay, long (ms) |
 |---|---:|---:|---:|---:|
 | A — quiet job | 31 / 6 | 32 / 12 | 123 (99–199) | 5 (3–12) |
@@ -29,6 +43,46 @@ Medians of three runs per cell. Detection delay is shown with its minimum–maxi
 ![Request count by condition](results/request-count-by-condition.svg)
 
 ![Completion-detection delay by condition (ms)](results/detection-delay-by-condition.svg)
+
+### Additional supporting evidence
+
+#### Request breakdown by condition and mode (median)
+
+| Condition | Mode | Initial 200 | Newer 200 | Unchanged 200 | 204 | Retrieval errors | Cancellations |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A — quiet job | short | 1 | 2 | 28 | 0 | 0 | 0 |
+| A — quiet job | long | 1 | 4 | 0 | 1 | 0 | 0 |
+| B — real progress | short | 1 | 1 | 0 | 0 | 0 | 0 |
+| B — real progress | long | 1 | 4 | 0 | 0 | 0 | 0 |
+| C1 — slow updates | short | 1 | 7 | 4 | 0 | 0 | 0 |
+| C1 — slow updates | long | 1 | 8 | 0 | 0 | 0 | 0 |
+| C2 — fast updates | short | 1 | 11 | 0 | 0 | 0 | 0 |
+| C2 — fast updates | long | 1 | 53 | 0 | 0 | 0 | 0 |
+| C3 — fast, +200 ms latency | short | 1 | 9 | 0 | 0 | 0 | 0 |
+| C3 — fast, +200 ms latency | long | 1 | 48 | 0 | 0 | 0 | 0 |
+
+This table confirms the traffic pattern: short polling mostly clusters on unchanged responses during quiet or slow work, while long polling converts the same work into a series of real wake-ups and immediate rechecks at each new version.
+
+#### Version gaps by condition and mode (median)
+
+| Condition | Mode | Median skipped versions | Range |
+|---|---:|---:|---:|
+| A — quiet job | short | 2 | 2–2 |
+| A — quiet job | long | 0 | 0–0 |
+| B — real progress | short | 3 | 3–3 |
+| B — real progress | long | 0 | 0–0 |
+| C1 — slow updates | short | 1 | 1–2 |
+| C1 — slow updates | long | 0 | 0–0 |
+| C2 — fast updates | short | 42 | 41–42 |
+| C2 — fast updates | long | 0 | 0–0 |
+| C3 — fast, +200 ms latency | short | 43 | 43–43 |
+| C3 — fast, +200 ms latency | long | 4 | 4–5 |
+
+The version-gap table matters because it shows that a final result can still be correct even when the browser skipped intermediate snapshots. The API returns the latest durable row, not a replayable event history.
+
+![Median observation database reads by condition](results/reads-by-condition.svg)
+
+![Median version gaps by condition](results/version-gaps-by-condition.svg)
 
 Real processing time was about 204–300 ms in every run, whatever the mode. 29 of our 30 predicted ranges were met. The one miss was C3 short-polling delay (1036 ms against 500–1000 ms predicted): the one-second wait is followed by a response that now crosses a path with about 200 ms added, so the worst case exceeds one second. Short-polling delays cluster tightly (A short 99–199 ms) because, with only three runs, the polling phase relative to the job's end was similar each time. Each long-polling run in A contained one normal 204 followed by an immediate new request, with no error.
 

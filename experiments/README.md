@@ -59,6 +59,8 @@ Generated outputs:
 
 Non-JSON lines in either log (for example a stray `go run` message) are skipped and counted rather than stopping the analysis. A run whose server flags or latency note disagree with its condition label is reported as `CONFIG MISMATCH` in its notes and in the workload check. `artificial_delay_ms` is the configured quiet and image-processing delay plus the measured length of the simulated phase; `real_processing_ms` is `processing_ms` minus that, and still includes the short claim-to-finish overhead.
 
+The CSV `notes` field is intentionally concise: it contains exceptions and the count of skipped intermediate versions, not full version lists or repeated workload settings. Detailed version records remain available in the raw JSONL logs.
+
 The browser stamps `Date.now()` as soon as the full response body has been read, before any logging work, and keeps its log in memory (it is written to localStorage after a terminal response, an error, or when the page is hidden), so storage work does not delay the timestamp. Detection delay uses browser `Date.now()` at terminal response receipt minus the server's `post_commit_at` log timestamp for the same job/version. This is valid only for the specified same-computer run; it remains an estimate affected by wall-clock resolution and scheduling. The script leaves detection blank if it cannot join the records and flags negative results instead of silently changing them. It also notes started requests with no response/error/cancellation record. Investigate missing logs, pending requests, version gaps, and unexpected outcomes before writing the report. Never edit raw logs to make runs look complete.
 
 ## Runs collected

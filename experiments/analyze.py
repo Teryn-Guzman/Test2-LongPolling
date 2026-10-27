@@ -260,28 +260,17 @@ def summarize(client_events, server_events):
             notes.append("terminal server post-commit log not joined")
         if detection_ms != "" and detection_ms < 0:
             notes.append("negative delay; investigate wall-clock/log ordering")
-        if received_versions:
-            notes.append("new versions received=" + ",".join(map(str, sorted(received_versions))))
-        if committed_versions:
-            notes.append("job versions committed=" + ",".join(map(str, sorted(committed_versions))))
         if baseline != "" and terminal_version != "":
             committed_observable = {version for version in committed_versions if baseline < version <= terminal_version}
             gaps = sorted(committed_observable - received_versions)
-            notes.append("intermediate versions not received=" + (",".join(map(str, gaps)) if gaps else "none"))
+            if gaps:
+                notes.append(f"{len(gaps)} intermediate version(s) skipped")
         artificial = artificial_delay_ms(workload, simulation_phase_ms(server_by_job.get(job_id, [])))
         real_processing = processing_ms - artificial if processing_ms != "" and artificial != "" else ""
         if real_processing != "" and real_processing < 0:
             notes.append("artificial delay exceeds processing_ms; check the server flags")
         for problem in workload_problems(metadata.get("condition", ""), metadata.get("latency_setting", ""), workload):
             notes.append("CONFIG MISMATCH: " + problem)
-        if workload:
-            notes.append(
-                "server workload: quiet_delay={quiet}, simulation_duration={duration}, simulation_interval={interval}".format(
-                    quiet=workload.get("quiet_delay", "unknown"),
-                    duration=workload.get("simulation_duration", "unknown"),
-                    interval=workload.get("simulation_interval", "unknown"),
-                )
-            )
         output.append({
             "run_id": run_id,
             "condition": metadata.get("condition", ""),
@@ -407,7 +396,7 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    lines = ["# Assessment 2 measured comparison", "", "Every row below is generated from the supplied client/server logs. Blank detection values mean the terminal commit could not be joined. The version lists and gaps are retained in the notes column.", "", *input_check, *workload_check, "## Runs", "", "| Run | Condition | Mode | Rep | Job | Requests | Detection (ms) | Processing (ms) | Artificial (ms) | Real (ms) | Versions | Notes |", "|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|"]
+    lines = ["# Assessment 2 measured comparison", "", "Every row below is generated from the supplied client/server logs. Blank detection values mean the terminal commit could not be joined. Notes show only exceptions and skipped-version counts; detailed version records remain in the raw logs.", "", *input_check, *workload_check, "## Runs", "", "| Run | Condition | Mode | Rep | Job | Requests | Detection (ms) | Processing (ms) | Artificial (ms) | Real (ms) | Versions | Notes |", "|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|"]
     for row in rows:
         lines.append("| {run_id} | {condition} | {mode} | {repetition} | {job_id} | {requests_started} | {detection_ms} | {processing_ms} | {artificial_delay_ms} | {real_processing_ms} | {distinct_new_versions_seen} | {notes} |".format(**row))
     lines.extend(["", "## Median (minimum–maximum) by condition and mode", "", "| Condition | Mode | Requests | Detection delay (ms) |", "|---|---|---:|---:|"])
